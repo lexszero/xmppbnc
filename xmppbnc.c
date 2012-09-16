@@ -62,10 +62,6 @@ static void cb_connection_close(LmConnection *connection, LmDisconnectReason rea
 	g_main_loop_quit(main_loop);
 }
 
-static LmHandlerResult cb_msg_presence(LmMessageHandler *handler, LmConnection *connection, LmMessage *m, gpointer data) {
-	LOGFD();
-}
-
 static LmHandlerResult cb_msg_message(LmMessageHandler *handler, LmConnection *connection, LmMessage *m, gpointer data) {
 	LOGFD();
 
@@ -174,6 +170,7 @@ static LmHandlerResult cb_msg_iq(LmMessageHandler *handler, LmConnection *connec
 			if (strcmp(node, NODE_RC_FORWARD) == 0) {
 				// TODO: send msgs from queue
 				msg_t *msg;
+				char *stamp;
 				LmMessageNode *addresses;
 				while (msg = (msg_t *)g_queue_pop_tail(queue)) {
 					LOGFD("sending msg");
@@ -187,14 +184,16 @@ static LmHandlerResult cb_msg_iq(LmMessageHandler *handler, LmConnection *connec
 							"type", "ofrom",
 							"jid", lm_message_node_get_attribute(msg->node, "from"),
 							NULL);
+					stamp = g_date_time_format(msg->time, "%Y-%m-%dT%H:%M:%SZ");
 					lm_message_node_set_attributes(
 							lm_message_node_add_child(reply->node, "delay", NULL),
 							"xmlns", XMLNS_DELAY,
 							"from", lm_message_node_get_attribute(m->node, "to"),
-							"stamp", g_date_time_format(msg->time, "%Y-%m-%dT%H:%M:%SZ"),
+							"stamp", stamp,
 							NULL);
 					lm_connection_send(connection, reply, NULL);
 					lm_message_unref(reply);
+					g_free(stamp);
 					msg_free(msg);
 				}
 				reply = lm_message_new_with_sub_type(
@@ -223,11 +222,6 @@ static int xmpp_connect() {
 			connection,
 			lm_message_handler_new(cb_msg_message, NULL, NULL),
 			LM_MESSAGE_TYPE_MESSAGE,
-			LM_HANDLER_PRIORITY_NORMAL);
-	lm_connection_register_message_handler(
-			connection,
-			lm_message_handler_new(cb_msg_presence, NULL, NULL),
-			LM_MESSAGE_TYPE_PRESENCE,
 			LM_HANDLER_PRIORITY_NORMAL);
 	lm_connection_register_message_handler(
 			connection,
