@@ -25,6 +25,10 @@ typedef struct msg_s {
 	GDateTime *time;
 } msg_t;
 
+static bool access_allowed(char *jid) {
+	return (strncmp(jid, ourjid, (strchr(ourjid, "/") - ourjid)) == 0);
+}
+
 static msg_t * msg_new(LmMessageNode *node) {
 	msg_t *msg = malloc(sizeof(msg_t));
 	msg->node = node;
@@ -302,7 +306,19 @@ static LmHandlerResult cb_msg_iq(LmMessageHandler *handler, LmConnection *connec
 	LmMessage *reply;
 	char *reply_to, *reply_id, *type, *xmlns, *node;
 	
-	reply_to = lm_message_node_get_attribute(m->node, "from"); 
+	reply_to = lm_message_node_get_attribute(m->node, "from");
+	
+	if (!reply_to) {
+		lm_message_unref(m);
+		return LM_HANDLER_RESULT_REMOVE_MESSAGE;
+	}
+
+	if (!access_allowed(reply_to)) {
+		LOGF("Access denied for %s", reply_to);
+		lm_message_unref(m);
+		return LM_HANDLER_RESULT_REMOVE_MESSAGE;
+	}
+
 	reply_id = lm_message_node_get_attribute(m->node, "id"); 
 	type = lm_message_node_get_attribute(m->node, "type");
 	LOGFD("type=%s", type);
