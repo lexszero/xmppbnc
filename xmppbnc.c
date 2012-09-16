@@ -35,7 +35,31 @@ static void msg_free(msg_t *msg) {
 }
 
 static void cb_connection_close(LmConnection *connection, LmDisconnectReason reason, gpointer data) {
-	LOGFD();
+	char *str;
+	switch (reason) {
+		case LM_DISCONNECT_REASON_OK:
+			str = "User requested disconnect.";
+			break;
+		case LM_DISCONNECT_REASON_PING_TIME_OUT:
+			str = "Connection to the server timed out";
+			break;
+		case LM_DISCONNECT_REASON_HUP:
+			str = "The socket emitted that the connection was hung up.";
+			break;
+		case LM_DISCONNECT_REASON_ERROR:
+			str = "A generic error somewhere in the transport layer.";
+			break;
+		case LM_DISCONNECT_REASON_RESOURCE_CONFLICT:
+			str = "Another connection was made to the server with the same resource.";
+			break;
+		case LM_DISCONNECT_REASON_INVALID_XML:
+			str = "Invalid XML was sent from the client.";
+			break;
+		case LM_DISCONNECT_REASON_UNKNOWN:
+			str = "An unknown error.";
+	}
+	LOGF("Disconnected. Reason: %s\n", str);
+	g_main_loop_quit(main_loop);
 }
 
 static LmHandlerResult cb_msg_presence(LmMessageHandler *handler, LmConnection *connection, LmMessage *m, gpointer data) {
@@ -167,7 +191,7 @@ static LmHandlerResult cb_msg_iq(LmMessageHandler *handler, LmConnection *connec
 							lm_message_node_add_child(reply->node, "delay", NULL),
 							"xmlns", XMLNS_DELAY,
 							"from", lm_message_node_get_attribute(m->node, "to"),
-							"stamp", g_date_time_format(&msg->time, "%Y-%m-%dT%H:%M:%SZ"),
+							"stamp", g_date_time_format(msg->time, "%Y-%m-%dT%H:%M:%SZ"),
 							NULL);
 					lm_connection_send(connection, reply, NULL);
 					lm_message_unref(reply);
@@ -255,8 +279,6 @@ static int xmpp_connect() {
 }
 
 int main(int argc, char *argv[]) {
-	LOGFD("hello");
-
 	context = g_main_context_new();
 	main_loop = g_main_loop_new(context, FALSE);
 
@@ -265,11 +287,12 @@ int main(int argc, char *argv[]) {
 	connection = lm_connection_new_with_context(xmpp_server, context);
 	assert(connection);
 
-	if (xmpp_connect() >= 0) {
-		LOGF("succesfully connected");
+	while (1) {
+		if (xmpp_connect() >= 0) {
+			LOGF("succesfully connected");
+		}
+		g_main_loop_run(main_loop);
 	}
-	g_main_loop_run(main_loop);
-/*	while (1) {
-		sleep(1);
-	}*/
+
+	return 0;
 }
