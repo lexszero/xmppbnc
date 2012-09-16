@@ -73,12 +73,14 @@ static void cb_connection_close(LmConnection *connection, LmDisconnectReason rea
 
 static LmHandlerResult cb_msg_message(LmMessageHandler *handler,
 		LmConnection *connection, LmMessage *m, gpointer data) {
-	LOGFD();
 
-	lm_message_node_ref(m->node);
-
-	msg_t *msg = msg_new(m->node);
-	g_queue_push_head(queue, (gpointer)msg);
+	if (!lm_message_node_get_child(m->node, "event")) {
+		LOGFD("storing message from %s",
+				lm_message_node_get_attribute(m->node, "from"));
+		lm_message_node_ref(m->node);
+		msg_t *msg = msg_new(m->node);
+		g_queue_push_head(queue, (gpointer)msg);
+	}
 
 	lm_message_unref(m);
 	return LM_HANDLER_RESULT_REMOVE_MESSAGE;
@@ -301,8 +303,7 @@ static void process_cmd_joinmuc(char *to, char *id, LmMessageNode *request) {
 
 static LmHandlerResult cb_msg_iq(LmMessageHandler *handler, LmConnection *connection,
 		LmMessage *m, gpointer data) {
-	LOGFD();
-	
+
 	LmMessage *reply;
 	char *reply_to, *reply_id, *type, *xmlns, *node;
 	
