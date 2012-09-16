@@ -2,6 +2,8 @@
 
 #define XMLNS_DISCO_ITEMS "http://jabber.org/protocol/disco#items"
 #define XMLNS_DISCO_INFO "http://jabber.org/protocol/disco#info"
+#define XMLNS_ADDRESS "http://jabber.org/protocol/address"
+#define XMLNS_DELAY "urn:xmpp:delay"
 #define NODE_COMMANDS "http://jabber.org/protocol/commands"
 #define NODE_RC_FORWARD "http://jabber.org/protocol/rc#forward"
 
@@ -13,6 +15,25 @@ LmConnection *connection;
 LmSSL *ssl;
 #endif
 
+GQueue *queue;
+typedef struct msg_s {
+	LmMessageNode *node;
+	GDateTime *time;
+} msg_t;
+
+static msg_t * msg_new(LmMessageNode *node) {
+	msg_t *msg = malloc(sizeof(msg_t));
+	msg->node = node;
+	msg->time = g_date_time_new_now_utc();
+	return msg;
+}
+
+static void msg_free(msg_t *msg) {
+	lm_message_node_unref(msg->node);
+	g_date_time_unref(msg->time);
+	free(msg);
+}
+
 static void cb_connection_close(LmConnection *connection, LmDisconnectReason reason, gpointer data) {
 	LOGFD();
 }
@@ -23,6 +44,14 @@ static LmHandlerResult cb_msg_presence(LmMessageHandler *handler, LmConnection *
 
 static LmHandlerResult cb_msg_message(LmMessageHandler *handler, LmConnection *connection, LmMessage *m, gpointer data) {
 	LOGFD();
+
+	lm_message_node_ref(m->node);
+
+	msg_t *msg = msg_new(m->node);
+	g_queue_push_head(queue, (gpointer)msg);
+
+	lm_message_unref(m);
+	return LM_HANDLER_RESULT_REMOVE_MESSAGE;
 }
 
 static LmHandlerResult cb_msg_iq(LmMessageHandler *handler, LmConnection *connection, LmMessage *m, gpointer data) {
@@ -30,8 +59,9 @@ static LmHandlerResult cb_msg_iq(LmMessageHandler *handler, LmConnection *connec
 	
 	LmMessageNode *query, *item;
 	LmMessage *reply;
-
-	char *type = lm_message_node_get_attribute(m->node, "type");
+	char *type, *xmlns, *node;
+	
+	type = lm_message_node_get_attribute(m->node, "type");
 	LOGFD("type=%s", type);
 	if (strcmp(type, "get") == 0) {
 		query = lm_message_node_get_child(m->node, "query");
@@ -39,8 +69,8 @@ static LmHandlerResult cb_msg_iq(LmMessageHandler *handler, LmConnection *connec
 			lm_message_unref(m);
 			return LM_HANDLER_RESULT_REMOVE_MESSAGE;
 		}
-		char *xmlns = lm_message_node_get_attribute(query, "xmlns");
-		char *node = lm_message_node_get_attribute(query, "node");
+		xmlns = lm_message_node_get_attribute(query, "xmlns");
+		node = lm_message_node_get_attribute(query, "node");
 		LOGFD("node=%s xmlns=%s", node, xmlns);
 		
 		reply = lm_message_new_with_sub_type(
@@ -112,18 +142,47 @@ static LmHandlerResult cb_msg_iq(LmMessageHandler *handler, LmConnection *connec
 			lm_message_unref(m);
 			return LM_HANDLER_RESULT_REMOVE_MESSAGE;
 		}
-		char *node = lm_message_node_get_attribute(query, "node");
+		xmlns = lm_message_node_get_attribute(query, "xmlns");
+		node = lm_message_node_get_attribute(query, "node");
 		LOGFD("node=%s", node);
 		if (strcmp(lm_message_node_get_attribute(query, "action"), "execute") == 0) {
 			LOGFD("action=execute");
-			if (strcmp(node, "http://jabber.org/protocol/rc#forward") == 0) {
+			if (strcmp(node, NODE_RC_FORWARD) == 0) {
+				// TODO: send msgs from queue
+				msg_t *msg;
+				LmMessageNode *addresses;
+				while (msg = (msg_t *)g_queue_pop_tail(queue)) {
+					LOGFD("sending msg");
+					reply = lm_message_new(lm_message_node_get_attribute(m->node, "from"), LM_MESSAGE_TYPE_MESSAGE);
+					lm_message_node_set_attribute(reply->node, "type", lm_message_node_get_attribute(msg->node, "type"));
+					reply->node->children = msg->node->children;
+					addresses = lm_message_node_add_child(reply->node, "addresses", NULL);
+					lm_message_node_set_attribute(addresses, "xmlns", XMLNS_ADDRESS);
+					lm_message_node_set_attributes(
+							lm_message_node_add_child(addresses, "address", NULL),
+							"type", "ofrom",
+							"jid", lm_message_node_get_attribute(msg->node, "from"),
+							NULL);
+					lm_message_node_set_attributes(
+							lm_message_node_add_child(reply->node, "delay", NULL),
+							"xmlns", XMLNS_DELAY,
+							"from", lm_message_node_get_attribute(m->node, "to"),
+							"stamp", g_date_time_format(&msg->time, "%Y-%m-%dT%H:%M:%SZ"),
+							NULL);
+					lm_connection_send(connection, reply, NULL);
+					lm_message_unref(reply);
+					msg_free(msg);
+				}
 				reply = lm_message_new_with_sub_type(
 						lm_message_node_get_attribute(m->node, "from"), LM_MESSAGE_TYPE_IQ, LM_MESSAGE_SUB_TYPE_RESULT);
 				lm_message_node_set_attribute(reply->node, "id", lm_message_node_get_attribute(m->node, "id"));
-				query = lm_message_node_add_child(reply->node, "command", NULL);
-				lm_message_node_set_attribute(query, "xmlns", "http://jabber.org/protocol/commands");
-				lm_message_node_set_attribute(query, "node", "http://jabber.org/protocol/rc#forward");
-				lm_message_node_set_attribute(query, "statuc", "completed");
+				lm_message_node_set_attributes(
+						lm_message_node_add_child(reply->node, "command", NULL),
+						"xmlns", xmlns,
+						"node", node,
+						"status", "completed",
+//						"sessionid", lm_message_node_get_attribute(query, "sessionid"),
+						NULL);
 				lm_connection_send(connection, reply, NULL);
 				lm_message_unref(reply);
 			}
@@ -200,6 +259,8 @@ int main(int argc, char *argv[]) {
 
 	context = g_main_context_new();
 	main_loop = g_main_loop_new(context, FALSE);
+
+	queue = g_queue_new();
 
 	connection = lm_connection_new_with_context(xmpp_server, context);
 	assert(connection);
