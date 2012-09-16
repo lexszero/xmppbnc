@@ -26,7 +26,7 @@ typedef struct msg_s {
 } msg_t;
 
 static bool access_allowed(char *jid) {
-	return (strncmp(jid, ourjid, (strchr(ourjid, "/") - ourjid)) == 0);
+	return (strncmp(jid, ourjid, (strchr(ourjid, '/') - ourjid)) == 0);
 }
 
 static msg_t * msg_new(LmMessageNode *node) {
