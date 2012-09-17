@@ -29,6 +29,7 @@ typedef struct msg_s {
 GHashTable *mucs;
 typedef struct muc_s {
 	char *req_from;
+	char *req_id;
 	char *req_sessionid;
 	enum muc_status_e {
 		MUC_UNEXPECTED = 0,
@@ -36,6 +37,13 @@ typedef struct muc_s {
 		MUC_JOINED
 	} status;
 } muc_t;
+
+static void destroy_muc_entry(muc_t *muc) {
+	free(muc->req_from);
+	free(muc->req_id);
+	free(muc->req_sessionid);
+	free(muc);
+}
 
 static bool access_allowed(char *jid) {
 	char *acl_jid;
@@ -136,7 +144,6 @@ static bool join_muc(char *full_jid, char *password) {
 		lm_message_node_add_child(x, "password", password);
 	}
 	send_and_unref(msg);
-	free(full_jid);
 
 	return true;
 }
@@ -147,8 +154,7 @@ static void join_muc_send_response(muc_t *muc, char *message) {
 	LmMessage *reply;
 	LmMessageNode *x;
 
-	reply = lm_message_new_with_sub_type(muc->req_from,
-			LM_MESSAGE_TYPE_IQ, LM_MESSAGE_SUB_TYPE_RESULT);
+	reply = make_msg_reply(muc->req_from, muc->req_id);
 	x = lm_message_node_add_child(reply->node, "command", NULL);
 	lm_message_node_set_attributes(x,
 			"xmlns", NODE_COMMANDS,
@@ -334,11 +340,13 @@ static void process_cmd_joinmuc(char *to, char *id, LmMessageNode *request) {
 
 		char *full_jid = malloc(3071);
 		snprintf(full_jid, 3071, "%s/%s", muc_jid, muc_nick);
+		full_jid = realloc(full_jid, strlen(full_jid)+1);
 
 		muc_t *muc = malloc(sizeof(muc_t));
 		muc->status = MUC_WAIT_RESPONSE;
 		muc->req_from = strdup(to);
-		muc->req_sessionid = lm_message_node_get_attribute(x, "sessionid");
+		muc->req_id = strdup(id);
+		muc->req_sessionid = strdup(lm_message_node_get_attribute(request, "sessionid"));
 		
 		LOGFD("inserting entry for %s", full_jid);
 		g_hash_table_insert(mucs, full_jid, muc);
@@ -434,9 +442,8 @@ static LmHandlerResult cb_msg_presence(LmMessageHandler *handler, LmConnection *
 	char *from, *type, *error;
 	from = lm_message_node_get_attribute(m->node, "from");
 	type = lm_message_node_get_attribute(m->node, "type");
-	LOGFD("presence from %s", from);
+	
 	muc_t *muc = g_hash_table_lookup(mucs, from);
-	LOGFD("lookup returned %s", muc);
 	if (muc && muc->status == MUC_WAIT_RESPONSE) {
 		if (type && (strcmp(type, "error") == 0)) {
 			free(muc);
@@ -523,7 +530,7 @@ int main(int argc, char *argv[]) {
 	queue = g_queue_new();
 	assert(queue);
 
-	mucs = g_hash_table_new(g_str_hash, g_str_equal);
+	mucs = g_hash_table_new_full(g_str_hash, g_str_equal, free, destroy_muc_entry);
 	assert(mucs);
 
 	connection = lm_connection_new_with_context(xmpp_server, context);
