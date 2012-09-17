@@ -6,6 +6,8 @@
 #define XMLNS_DELAY "urn:xmpp:delay"
 #define XMLNS_DATA "jabber:x:data"
 #define XMLNS_MUC "http://jabber.org/protocol/muc"
+#define XMLNS_PRIVATE "jabber:iq:private"
+#define XMLNS_BOOKMARKS "storage:bookmarks"
 #define NODE_COMMANDS "http://jabber.org/protocol/commands"
 #define NODE_RC_FORWARD "http://jabber.org/protocol/rc#forward"
 #define NODE_RC_JOINMUC "http://jabber.org/protocol/rc#joinmuc"
@@ -68,6 +70,33 @@ static void msg_free(msg_t *msg) {
 	free(msg);
 }
 
+static bool send_and_unref(LmMessage *msg) {
+	GError *err = NULL;
+	if (!lm_connection_send(connection, msg, &err)) {
+		LOGF("%s", err->message);
+		g_clear_error(&err);
+		lm_message_unref(msg);
+		return false;
+	}
+	lm_message_unref(msg);
+	return true;
+}
+
+static LmMessage * make_msg_reply(char *to, char *id) {
+	LmMessage *msg = lm_message_new_with_sub_type(to,
+			LM_MESSAGE_TYPE_IQ,	LM_MESSAGE_SUB_TYPE_RESULT);
+	lm_message_node_set_attribute(msg->node, "id", id);
+	return msg;
+}
+static LmMessageNode * make_query(LmMessageNode *root, char *xmlns, char *node) {
+	LmMessageNode *query = lm_message_node_add_child(root, "query", NULL);
+	if (node)
+		lm_message_node_set_attribute(query, "node", node);
+	if (xmlns)
+		lm_message_node_set_attribute(query, "xmlns", xmlns);
+	return query;
+}
+
 static void cb_connection_close(LmConnection *connection, LmDisconnectReason reason,
 		gpointer data) {
 	char *str;
@@ -112,26 +141,7 @@ static LmHandlerResult cb_msg_message(LmMessageHandler *handler,
 	return LM_HANDLER_RESULT_REMOVE_MESSAGE;
 }
 
-static bool send_and_unref(LmMessage *msg) {
-	GError *err = NULL;
-	if (!lm_connection_send(connection, msg, &err)) {
-		LOGF("%s", err->message);
-		g_clear_error(&err);
-		lm_message_unref(msg);
-		return false;
-	}
-	lm_message_unref(msg);
-	return true;
-}
-
-static LmMessage * make_msg_reply(char *to, char *id) {
-	LmMessage *msg = lm_message_new_with_sub_type(to,
-			LM_MESSAGE_TYPE_IQ,	LM_MESSAGE_SUB_TYPE_RESULT);
-	lm_message_node_set_attribute(msg->node, "id", id);
-	return msg;
-}
-
-static bool join_muc(char *full_jid, char *password) {
+static void request_join_muc(char *full_jid, char *password) {
 	LOGF("Joining %s", full_jid);
 
 	LmMessage *msg;
@@ -144,8 +154,26 @@ static bool join_muc(char *full_jid, char *password) {
 		lm_message_node_add_child(x, "password", password);
 	}
 	send_and_unref(msg);
+}
 
-	return true;
+static muc_t * join_muc(char *jid, char *nick, char *password, char *req_from,
+		char *req_id, char *req_sessionid) {
+
+	nick = nick ? nick : xmpp_username;
+	char *full_jid = malloc(3071);
+	snprintf(full_jid, 3071, "%s/%s", jid, nick);
+	full_jid = realloc(full_jid, strlen(full_jid)+1);
+
+	muc_t *muc = malloc(sizeof(muc_t));
+	muc->status = MUC_WAIT_RESPONSE;
+	muc->req_from = req_from ? strdup(req_from) : NULL;
+	muc->req_id = req_id ? strdup(req_id) : NULL;
+	muc->req_sessionid = req_sessionid ? strdup(req_sessionid) : NULL;
+
+	g_hash_table_insert(mucs, full_jid, muc);
+
+	request_join_muc(full_jid, password);
+	return muc;
 }
 
 static void join_muc_send_response(muc_t *muc, char *message) {
@@ -173,13 +201,32 @@ static void join_muc_send_response(muc_t *muc, char *message) {
 	send_and_unref(reply);
 }
 
-static LmMessageNode * make_query(LmMessageNode *root, char *xmlns, char *node) {
-	LmMessageNode *query = lm_message_node_add_child(root, "query", NULL);
-	if (node)
-		lm_message_node_set_attribute(query, "node", node);
-	if (xmlns)
-		lm_message_node_set_attribute(query, "xmlns", xmlns);
-	return query;
+static void request_bookmarks() {
+	LmMessage *msg = lm_message_new(NULL, LM_MESSAGE_TYPE_IQ);
+	lm_message_node_set_attribute(msg->node, "type", "get");
+
+	LmMessageNode *query = make_query(msg->node, XMLNS_PRIVATE, NULL);
+	lm_message_node_set_attribute(lm_message_node_add_child(query, "storage", NULL),
+			"xmlns", XMLNS_BOOKMARKS);
+
+	send_and_unref(msg);
+}
+
+static void save_muc_to_bookmarks(char *jid, char *nick, char *password,
+		bool autojoin) {
+	LmMessage *msg = lm_message_new(NULL, LM_MESSAGE_TYPE_IQ);
+	lm_message_node_set_attribute(msg->node, "type", "set");
+
+	LmMessageNode *node = make_query(msg->node, XMLNS_PRIVATE, NULL);
+	node = lm_message_node_add_child(node, "storage", NULL);
+	lm_message_node_set_attribute(node, "xmlns", XMLNS_BOOKMARKS);
+	node = lm_message_node_add_child(node, "conference", NULL);
+/* TODO
+	lm_message_node_set_attributes(node,
+			"autojoin", 
+*/
+
+
 }
 
 static void make_items_root(LmMessageNode *query) {
@@ -315,6 +362,18 @@ static void process_cmd_joinmuc(char *to, char *id, LmMessageNode *request) {
 				"label", "Password",
 				"var", "muc_password",
 				NULL);
+		lm_message_node_set_attributes(
+				lm_message_node_add_child(x, "field", NULL),
+				"type", "boolean",
+				"label", "Save to bookmarks",
+				"var", "muc_save_to_bookmarks",
+				NULL);
+		lm_message_node_set_attributes(
+				lm_message_node_add_child(x, "field", NULL),
+				"type", "boolean",
+				"label", "Autojoin",
+				"var", "muc_autojoin",
+				NULL);
 		send_and_unref(reply);
 	}
 	else if (!action || (action && (strcmp(action, "complete") == 0))) {
@@ -325,6 +384,7 @@ static void process_cmd_joinmuc(char *to, char *id, LmMessageNode *request) {
 		}
 		LmMessageNode *field;
 		char *name, *value, *muc_jid, *muc_nick, *muc_password;
+		bool muc_save_to_bookmarks, muc_autojoin;
 		for (field = x->children; field; field = field->next) {
 			name = lm_message_node_get_attribute(field, "var");
 			value = lm_message_node_get_value(
@@ -336,21 +396,17 @@ static void process_cmd_joinmuc(char *to, char *id, LmMessageNode *request) {
 				muc_nick = value;
 			if (strcmp(name, "muc_password") == 0)
 				muc_password = value;
+			if (strcmp(name, "muc_save_to_bookmarks") == 0)
+				muc_save_to_bookmarks = (strcmp(value, "1") == 0);
+			if (strcmp(name, "muc_autojoin") == 0)
+				muc_autojoin = (strcmp(value, "1") == 0);
 		}
 
-		char *full_jid = malloc(3071);
-		snprintf(full_jid, 3071, "%s/%s", muc_jid, muc_nick);
-		full_jid = realloc(full_jid, strlen(full_jid)+1);
+		if (muc_save_to_bookmarks)
+			save_muc_to_bookmarks(muc_jid, muc_nick, muc_password, muc_autojoin);
 
-		muc_t *muc = malloc(sizeof(muc_t));
-		muc->status = MUC_WAIT_RESPONSE;
-		muc->req_from = strdup(to);
-		muc->req_id = strdup(id);
-		muc->req_sessionid = strdup(lm_message_node_get_attribute(request, "sessionid"));
-		
-		LOGFD("inserting entry for %s", full_jid);
-		g_hash_table_insert(mucs, full_jid, muc);
-		join_muc(full_jid, muc_password);
+		join_muc(muc_jid, muc_nick, muc_password, to, id,
+				lm_message_node_get_attribute(request, "sessionid"));
 	}
 }
 
@@ -431,6 +487,31 @@ static LmHandlerResult cb_msg_iq(LmMessageHandler *handler, LmConnection *connec
 		}
 		else if (strcmp(node, NODE_RC_JOINMUC) == 0) {
 			process_cmd_joinmuc(reply_to, reply_id, command);
+		}
+	}
+	else if (strcmp(type, "result") == 0) {
+		LmMessageNode *query = lm_message_node_get_child(m->node, "query");
+		if (!query) {
+			lm_message_unref(m);
+			return LM_HANDLER_RESULT_REMOVE_MESSAGE;
+		}
+		xmlns = lm_message_node_get_attribute(query, "xmlns");
+		if (strcmp(xmlns, XMLNS_PRIVATE) == 0) {
+			LmMessageNode *conference = lm_message_node_get_child(query, "conference");
+			if (!conference) {
+				lm_message_unref(m);
+				return LM_HANDLER_RESULT_REMOVE_MESSAGE;
+			}
+			char *autojoin = lm_message_node_get_attribute(conference, "autojoin");
+			if (autojoin && (strcmp(autojoin, "1") == 0)) {
+				char *muc_jid, *muc_nick, *muc_password;
+				muc_jid = lm_message_node_get_attribute(conference, "jid");
+				muc_nick = lm_message_node_get_value(
+						lm_message_node_get_child(conference, "nick"));
+				muc_password = lm_message_node_get_value(
+						lm_message_node_get_child(conference, "password"));
+				join_muc(muc_jid, muc_nick, muc_password, NULL, NULL, NULL);
+			}
 		}
 	}
 	lm_message_unref(m);
