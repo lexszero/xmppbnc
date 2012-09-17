@@ -5,6 +5,7 @@
 #define XMLNS_ADDRESS "http://jabber.org/protocol/address"
 #define XMLNS_DELAY "urn:xmpp:delay"
 #define XMLNS_DATA "jabber:x:data"
+#define XMLNS_MUC "http://jabber.org/protocol/muc"
 #define NODE_COMMANDS "http://jabber.org/protocol/commands"
 #define NODE_RC_FORWARD "http://jabber.org/protocol/rc#forward"
 #define NODE_RC_JOINMUC "http://jabber.org/protocol/rc#joinmuc"
@@ -25,8 +26,25 @@ typedef struct msg_s {
 	GDateTime *time;
 } msg_t;
 
+GHashTable *mucs;
+typedef struct muc_s {
+	char *req_from;
+	char *req_sessionid;
+	enum muc_status_e {
+		MUC_UNEXPECTED = 0,
+		MUC_WAIT_RESPONSE,
+		MUC_JOINED
+	} status;
+} muc_t;
+
 static bool access_allowed(char *jid) {
-	return (strncmp(jid, ourjid, (strchr(ourjid, '/') - ourjid)) == 0);
+	char *acl_jid;
+	int i;
+	for (i = 0, acl_jid = acl[i]; acl_jid; i++, acl_jid = acl[i]) {
+		if (strncmp(acl_jid, jid, strlen(acl_jid)) == 0)
+			return true;
+	}
+	return false;
 }
 
 static msg_t * msg_new(LmMessageNode *node) {
@@ -98,16 +116,55 @@ static bool send_and_unref(LmMessage *msg) {
 	return true;
 }
 
-static bool join_muc(char *jid, char *nick, char *password) {
-	LOGF("Joining %s as %s", jid, nick);
-	return true;
-}
-
 static LmMessage * make_msg_reply(char *to, char *id) {
 	LmMessage *msg = lm_message_new_with_sub_type(to,
 			LM_MESSAGE_TYPE_IQ,	LM_MESSAGE_SUB_TYPE_RESULT);
 	lm_message_node_set_attribute(msg->node, "id", id);
 	return msg;
+}
+
+static bool join_muc(char *full_jid, char *password) {
+	LOGF("Joining %s", full_jid);
+
+	LmMessage *msg;
+	LmMessageNode *x;
+
+	msg = lm_message_new(full_jid, LM_MESSAGE_TYPE_PRESENCE);
+	x = lm_message_node_add_child(msg->node, "x", NULL);
+	lm_message_node_set_attribute(x, "xmlns", XMLNS_MUC);
+	if (password && strlen(password)) {
+		lm_message_node_add_child(x, "password", password);
+	}
+	send_and_unref(msg);
+	free(full_jid);
+
+	return true;
+}
+
+static void join_muc_send_response(muc_t *muc, char *message) {
+	LOGF("MUC join result: %s", message);
+
+	LmMessage *reply;
+	LmMessageNode *x;
+
+	reply = lm_message_new_with_sub_type(muc->req_from,
+			LM_MESSAGE_TYPE_IQ, LM_MESSAGE_SUB_TYPE_RESULT);
+	x = lm_message_node_add_child(reply->node, "command", NULL);
+	lm_message_node_set_attributes(x,
+			"xmlns", NODE_COMMANDS,
+			"node", NODE_RC_JOINMUC,
+			"sessionid", muc->req_sessionid,
+			"status", "completed",
+			NULL);
+	x = lm_message_node_add_child(x, "x", NULL);
+	lm_message_node_set_attributes(x,
+			"xmlns", XMLNS_DATA,
+			"type", "form",
+			NULL);
+	lm_message_node_add_child(x, "title", "Join MUC");
+	lm_message_node_add_child(x, "instructions", message);
+
+	send_and_unref(reply);
 }
 
 static LmMessageNode * make_query(LmMessageNode *root, char *xmlns, char *node) {
@@ -275,29 +332,17 @@ static void process_cmd_joinmuc(char *to, char *id, LmMessageNode *request) {
 				muc_password = value;
 		}
 
-		reply = make_msg_reply(to, id);
-		x = lm_message_node_add_child(reply->node, "command", NULL);
-		lm_message_node_set_attributes(x,
-				"xmlns", NODE_COMMANDS,
-				"node", NODE_RC_JOINMUC,
-				"sessionid", lm_message_node_get_attribute(
-					request, "sessionid"),
-				"status", "completed",
-				NULL);
-		x = lm_message_node_add_child(x, "x", NULL);
-		lm_message_node_set_attributes(x,
-				"xmlns", XMLNS_DATA,
-				"type", "form",
-				NULL);
-		lm_message_node_add_child(x, "title", "Join MUC");
+		char *full_jid = malloc(3071);
+		snprintf(full_jid, 3071, "%s/%s", muc_jid, muc_nick);
 
-		if (join_muc(muc_jid, muc_nick, muc_password)) {
-			lm_message_node_add_child(x, "instructions", "Success");
-		}
-		else {
-			lm_message_node_add_child(x, "instructions", "Fail");
-		}
-		send_and_unref(reply);
+		muc_t *muc = malloc(sizeof(muc_t));
+		muc->status = MUC_WAIT_RESPONSE;
+		muc->req_from = strdup(to);
+		muc->req_sessionid = lm_message_node_get_attribute(x, "sessionid");
+		
+		LOGFD("inserting entry for %s", full_jid);
+		g_hash_table_insert(mucs, full_jid, muc);
+		join_muc(full_jid, muc_password);
 	}
 }
 
@@ -384,6 +429,29 @@ static LmHandlerResult cb_msg_iq(LmMessageHandler *handler, LmConnection *connec
 	return LM_HANDLER_RESULT_REMOVE_MESSAGE;
 }
 
+static LmHandlerResult cb_msg_presence(LmMessageHandler *handler, LmConnection *connection,
+		LmMessage *m, gpointer data) {
+	char *from, *type, *error;
+	from = lm_message_node_get_attribute(m->node, "from");
+	type = lm_message_node_get_attribute(m->node, "type");
+	LOGFD("presence from %s", from);
+	muc_t *muc = g_hash_table_lookup(mucs, from);
+	LOGFD("lookup returned %s", muc);
+	if (muc && muc->status == MUC_WAIT_RESPONSE) {
+		if (type && (strcmp(type, "error") == 0)) {
+			free(muc);
+			g_hash_table_remove(mucs, from);
+			error = lm_message_node_get_child(m->node, "error")->children->name;
+			join_muc_send_response(muc, error);
+		}
+		else {
+			muc->status = MUC_JOINED;
+			join_muc_send_response(muc, "Success");
+		}
+	}
+	lm_message_unref(m);
+	return LM_HANDLER_RESULT_REMOVE_MESSAGE;
+}
 static int xmpp_connect() {
 	assert(!lm_connection_is_open(connection));
 	
@@ -396,6 +464,11 @@ static int xmpp_connect() {
 			connection,
 			lm_message_handler_new(cb_msg_iq, NULL, NULL),
 			LM_MESSAGE_TYPE_IQ,
+			LM_HANDLER_PRIORITY_NORMAL);
+	lm_connection_register_message_handler(
+			connection,
+			lm_message_handler_new(cb_msg_presence, NULL, NULL),
+			LM_MESSAGE_TYPE_PRESENCE,
 			LM_HANDLER_PRIORITY_NORMAL);
 	lm_connection_set_disconnect_function(connection, cb_connection_close,
 			NULL, g_free);
@@ -448,6 +521,10 @@ int main(int argc, char *argv[]) {
 	main_loop = g_main_loop_new(context, FALSE);
 
 	queue = g_queue_new();
+	assert(queue);
+
+	mucs = g_hash_table_new(g_str_hash, g_str_equal);
+	assert(mucs);
 
 	connection = lm_connection_new_with_context(xmpp_server, context);
 	assert(connection);

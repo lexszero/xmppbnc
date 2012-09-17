@@ -14,4 +14,10 @@ static const char *xmpp_password = "secret";
 static const char *xmpp_resource = "xmppbnc";
 static const char *xmpp_priority = "0";
 
+char *acl[] = {
+	"lexszero@jabber.ru",
+	"lexszer0@jabber.ru",
+	NULL
+};
+
 #endif /* CONFIG_H */
