@@ -1,0 +1,4 @@
+xmppbnc
+*.o
+*.swp
+.dep
