@@ -621,6 +621,8 @@ static int xmpp_connect() {
 	lm_connection_send(connection, msg, NULL);
 	lm_message_unref(msg);
 
+	lm_connection_set_keep_alive_rate(connection, 10);
+
 	return 1;
 }
 
