@@ -21,6 +21,7 @@ enum {
 GMainLoop *main_loop;
 GMainContext *context;
 
+bool connected = false;
 char *ourjid;
 
 LmConnection *connection;
@@ -36,11 +37,13 @@ typedef struct msg_s {
 
 GHashTable *mucs;
 typedef struct muc_s {
+	char *password;
 	char *req_from;
 	char *req_id;
 	char *req_sessionid;
 	enum muc_status_e {
 		MUC_UNEXPECTED = 0,
+		MUC_UNJOINED,
 		MUC_WAIT_RESPONSE,
 		MUC_JOINED
 	} status;
@@ -48,6 +51,7 @@ typedef struct muc_s {
 
 static void destroy_muc_entry(void *muc_) {
 	muc_t *muc = (muc_t *)muc_;
+	free(muc->password);
 	free(muc->req_from);
 	free(muc->req_id);
 	free(muc->req_sessionid);
@@ -104,6 +108,13 @@ static LmMessageNode * make_query(LmMessageNode *root, const char *xmlns, const 
 	return query;
 }
 
+static void each_muc_leave(gpointer key, gpointer value, gpointer data) {
+	(void)key;
+	(void)data;
+	muc_t *muc = (muc_t *)value;
+	muc->status = MUC_UNJOINED;
+}
+
 static void cb_connection_close(LmConnection *connection, LmDisconnectReason reason,
 		gpointer data) {
 	(void)connection;
@@ -133,6 +144,7 @@ static void cb_connection_close(LmConnection *connection, LmDisconnectReason rea
 			str = "An unknown error.";
 	}
 	LOGF("Disconnected. Reason: %s\n", str);
+	g_hash_table_foreach(mucs, each_muc_leave, NULL);
 	g_main_loop_quit(main_loop);
 }
 
@@ -154,7 +166,7 @@ static LmHandlerResult cb_msg_message(LmMessageHandler *handler,
 	return LM_HANDLER_RESULT_REMOVE_MESSAGE;
 }
 
-static void request_join_muc(const char *full_jid, const char *password) {
+static void request_join_muc(const char *full_jid, muc_t *muc) {
 	LOGF("Joining %s", full_jid);
 
 	LmMessage *msg;
@@ -163,10 +175,11 @@ static void request_join_muc(const char *full_jid, const char *password) {
 	msg = lm_message_new(full_jid, LM_MESSAGE_TYPE_PRESENCE);
 	x = lm_message_node_add_child(msg->node, "x", NULL);
 	lm_message_node_set_attribute(x, "xmlns", XMLNS_MUC);
-	if (password && strlen(password)) {
-		lm_message_node_add_child(x, "password", password);
+	if (muc->password && strlen(muc->password)) {
+		lm_message_node_add_child(x, "password", muc->password);
 	}
 	send_and_unref(msg);
+	muc->status = MUC_WAIT_RESPONSE;
 }
 
 static muc_t * join_muc(const char *jid, const char *nick, const char *password, const char *req_from,
@@ -178,14 +191,15 @@ static muc_t * join_muc(const char *jid, const char *nick, const char *password,
 	full_jid = realloc(full_jid, strlen(full_jid)+1);
 
 	muc_t *muc = malloc(sizeof(muc_t));
-	muc->status = MUC_WAIT_RESPONSE;
+	muc->status = MUC_UNJOINED;
+	muc->password = password ? strdup(password) : NULL;
 	muc->req_from = req_from ? strdup(req_from) : NULL;
 	muc->req_id = req_id ? strdup(req_id) : NULL;
 	muc->req_sessionid = req_sessionid ? strdup(req_sessionid) : NULL;
 
 	g_hash_table_insert(mucs, full_jid, muc);
 
-	request_join_muc(full_jid, password);
+	request_join_muc(full_jid, muc);
 	return muc;
 }
 
@@ -214,6 +228,14 @@ static void join_muc_send_response(const muc_t *muc, const char *message) {
 	send_and_unref(reply);
 }
 
+static void each_muc_rejoin(gpointer key, gpointer value, gpointer data) {
+	(void)data;
+	char *full_jid = (char *)key;
+	muc_t *muc = (muc_t *)value;
+	assert(muc->status == MUC_UNJOINED);
+	request_join_muc(full_jid, muc);
+}
+
 static void request_bookmarks() {
 	LmMessage *msg = lm_message_new(NULL, LM_MESSAGE_TYPE_IQ);
 	lm_message_node_set_attribute(msg->node, "type", "get");
@@ -238,8 +260,6 @@ static void save_muc_to_bookmarks(const char *jid, const char *nick, const char 
 	lm_message_node_set_attributes(node,
 			"autojoin", 
 */
-
-
 }
 
 static void make_items_root(LmMessageNode *query) {
@@ -560,6 +580,7 @@ static LmHandlerResult cb_msg_presence(LmMessageHandler *handler, LmConnection *
 	lm_message_unref(m);
 	return LM_HANDLER_RESULT_REMOVE_MESSAGE;
 }
+
 static int xmpp_connect() {
 	assert(!lm_connection_is_open(connection));
 	
@@ -623,6 +644,9 @@ static int xmpp_connect() {
 
 	lm_connection_set_keep_alive_rate(connection, 10);
 
+	connected = true;
+
+	g_hash_table_foreach(mucs, each_muc_rejoin, NULL);
 	return 1;
 }
 
